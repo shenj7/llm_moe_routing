@@ -1,0 +1,110 @@
+# ============================================================
+# LLaDA Progressive Distillation Configuration
+# ============================================================
+#
+# Strategy: halve the number of denoising steps three times
+#   128 steps  →  64 steps  →  32 steps  →  16 steps
+#
+# Each round trains a student to mimic what the current teacher
+# produces in 2 steps, in a single student step (score matching
+# loss on the predicted-token probability distributions).
+# ============================================================
+
+teacher:
+  model_id: "GSAI-ML/LLaDA-8B-Instruct"
+  trust_remote_code: true
+  # Quantise teacher to 8-bit to save ~8 GB VRAM on an A30 (24 GB).
+  # Set false if bitsandbytes is unavailable; teacher will use bf16 (~16 GB).
+  load_in_8bit: true
+  # LLaDA's [MASK] special token ID.  Looked up from the tokenizer at runtime;
+  # this value is used as a fallback if the tokenizer doesn't expose it.
+  mask_token_id: 126336
+
+# ------------------------------------------------------------------
+# Progressive distillation rounds
+# ------------------------------------------------------------------
+distillation:
+  initial_steps: 128        # Default LLaDA inference steps (matched to seq length)
+
+  rounds:
+    - name: "round0_128to64"
+      teacher_steps: 128
+      student_steps: 64
+      # Student architecture.  Point to a YAML in config/student_configs/,
+      # or use the 'student_preset' shorthand ("400m" | "1b" | "3b").
+      student_config: "config/student_configs/student_1b.yaml"
+      # student_ckpt: null   # Set to a .pt path to resume from a checkpoint.
+      max_train_steps: 20000
+
+    - name: "round1_64to32"
+      teacher_steps: 64
+      student_steps: 32
+      student_config: "config/student_configs/student_1b.yaml"
+      # After round 0 finishes, the trained student becomes the new teacher.
+      use_prev_student_as_teacher: true
+      max_train_steps: 20000
+
+    - name: "round2_32to16"
+      teacher_steps: 32
+      student_steps: 16
+      student_config: "config/student_configs/student_1b.yaml"
+      use_prev_student_as_teacher: true
+      max_train_steps: 20000
+
+  # Loss applied to masked positions between student and teacher distributions.
+  #   "score_matching"  – MSE between softmax probability vectors  (default)
+  #   "kl"              – KL divergence KL(teacher ‖ student)
+  #   "cross_entropy"   – hard-label CE using teacher's argmax
+  loss_type: "score_matching"
+
+  # Optionally mix in the original MDM training loss (cross-entropy on true tokens).
+  # Set to 0.0 to use pure distillation loss.
+  loss_weight_original: 0.0
+
+# ------------------------------------------------------------------
+# Training data
+# ------------------------------------------------------------------
+data:
+  # LLaDA's exact training data is not publicly released (2.3 T tokens of
+  # general web text, code, math, and multilingual content).
+  # FineWeb is the closest available open proxy: 15 T high-quality web tokens.
+  # https://huggingface.co/datasets/HuggingFaceFW/fineweb
+  #
+  # For distillation the data distribution matters less than the teacher
+  # architecture: any large, diverse corpus is fine.
+  dataset_name: "HuggingFaceFW/fineweb"
+  dataset_config: "sample-10BT"   # 10 B-token subset; change to "default" for full 15 T
+  text_column: "text"
+
+  # Must match the sequence length used during teacher inference.
+  # LLaDA performs best when steps == response length, so keep both at 128.
+  max_seq_length: 128
+
+  streaming: true     # Stream dataset to avoid downloading everything upfront
+  num_workers: 2      # DataLoader workers (keep low with streaming datasets)
+
+# ------------------------------------------------------------------
+# Optimiser / training loop
+# ------------------------------------------------------------------
+training:
+  batch_size: 4                    # Per-GPU micro-batch
+  gradient_accumulation_steps: 8   # Effective batch size = 4 × 8 = 32
+  learning_rate: 3.0e-4
+  warmup_ratio: 0.05               # 5 % of steps used for LR warm-up
+  lr_scheduler: "cosine"
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+  mixed_precision: "bf16"          # bfloat16 for A30 / Ampere GPUs
+  gradient_checkpointing: true     # Reduces activation memory at cost of recomputation
+
+  # "adamw_bnb_8bit"  – bitsandbytes 8-bit Adam (saves ~50 % optimiser VRAM)
+  # "adamw"           – standard PyTorch AdamW (fallback if bnb not installed)
+  optimizer: "adamw_bnb_8bit"
+
+  seed: 42
+  log_every: 50          # Print loss every N gradient steps
+  save_every: 2000       # Save a checkpoint every N gradient steps
+  save_dir: "checkpoints/distill"
+
+hardware:
+  device: "cuda"

@@ -1,0 +1,29 @@
+# ============================================================
+# Student model config – ~3 B parameters
+# ============================================================
+# NOTE: A30 (24 GB) memory budget with 8-bit teacher (~8 GB):
+#   student params  ~6 GB (bf16)
+#   activations     ~6 GB (gradient checkpointing on)
+#   8-bit Adam      ~6 GB
+#   ─────────────────────
+#   total           ~26 GB  (slightly over budget)
+#
+# To fit in 24 GB, use one of:
+#   1. 4-bit teacher: set teacher.load_in_4bit=true  → saves 4 GB
+#   2. Reduce batch_size to 2 and gradient_accumulation_steps to 16
+#   3. Enable CPU offload for teacher (slower)
+# ============================================================
+
+architecture:
+  base_model_id: "GSAI-ML/LLaDA-8B-Base"
+  trust_remote_code: true
+
+  # ~3 B parameters
+  num_hidden_layers: 28
+  hidden_size: 3072
+  num_attention_heads: 24
+  num_key_value_heads: 8
+  intermediate_size: 8192
+  max_position_embeddings: 4096
+
+  tie_vocab_to_teacher: false

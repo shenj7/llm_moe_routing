@@ -1,3 +1,7 @@
+# --- added for progressive distillation ---
+bitsandbytes>=0.43.0        # 8-bit teacher quantisation + 8-bit Adam
+accelerate>=0.30.0          # device_map="auto" for teacher loading
+# ------------------------------------------
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.4
 aiosignal==1.4.0

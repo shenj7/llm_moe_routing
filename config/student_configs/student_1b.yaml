@@ -1,0 +1,34 @@
+# ============================================================
+# Student model config – ~1 B parameters
+# ============================================================
+# Derived from LLaDA-8B's architecture class (bidirectional
+# transformer, no causal mask) with reduced layer count and
+# hidden dimension.
+#
+# LLaDA-8B baseline for reference:
+#   num_hidden_layers  : 32
+#   hidden_size        : 4096
+#   num_attention_heads: 32
+#   num_key_value_heads: 8
+#   intermediate_size  : 14336
+# ============================================================
+
+architecture:
+  # HF model ID used as the config / tokenizer template.
+  # The student inherits the SAME vocabulary and architecture
+  # class (LLaDA bidirectional transformer) but with smaller dims.
+  base_model_id: "GSAI-ML/LLaDA-8B-Base"
+  trust_remote_code: true
+
+  # ~1 B parameters
+  num_hidden_layers: 16
+  hidden_size: 2048
+  num_attention_heads: 16
+  num_key_value_heads: 8
+  intermediate_size: 5632
+  max_position_embeddings: 4096
+
+  # Keep the teacher's embedding matrix vocab size so the distillation
+  # loss compares probability vectors over the same token space.
+  # The actual embedding weights are re-initialised randomly for the student.
+  tie_vocab_to_teacher: false
