@@ -126,11 +126,15 @@ def create_student_model(
     logger.info("Fetching base config from %s …", template_model_id)
     config = AutoConfig.from_pretrained(template_model_id, trust_remote_code=True)
 
+    # Rebuild config from its dict so we can override read-only properties
+    # that newer transformers versions expose via property descriptors.
+    config_dict = config.to_dict()
     for key, value in size_params.items():
-        if hasattr(config, key):
-            setattr(config, key, value)
+        if key in config_dict or hasattr(config, key):
+            config_dict[key] = value
         else:
             logger.warning("Config has no attribute '%s' — skipping.", key)
+    config = type(config).from_dict(config_dict)
 
     # ---- Build model with random weights -----------------------------------
     logger.info("Instantiating student model …")
