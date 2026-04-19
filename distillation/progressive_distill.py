@@ -190,7 +190,7 @@ class ProgressiveDistiller:
         ckpt_path = round_cfg.get("student_ckpt")
         if ckpt_path and os.path.isfile(ckpt_path):
             logger.info("Resuming student from checkpoint: %s", ckpt_path)
-            state = torch.load(ckpt_path, map_location="cpu")
+            state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
             student.load_state_dict(state)
 
         student = student.to(self.device, dtype=torch.bfloat16)
@@ -346,6 +346,13 @@ class ProgressiveDistiller:
                     mdm_weight       = mdm_weight,
                 )
                 loss = loss / grad_accum
+
+            if not torch.isfinite(loss):
+                logger.error(
+                    "Non-finite loss (%.4g) at micro_step %d — stopping round.",
+                    loss.item(), micro_step,
+                )
+                break
 
             loss.backward()
             running_loss += loss.item()

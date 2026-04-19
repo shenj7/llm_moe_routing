@@ -96,9 +96,9 @@ def cross_entropy_distillation_loss(
     hard_targets = target_probs.argmax(dim=-1)  # [B, L]
 
     B, L, V = student_logits.shape
-    logits_flat  = student_logits.view(B * L, V)
-    targets_flat = hard_targets.view(B * L)
-    mask_flat    = masked_positions.view(B * L)
+    logits_flat  = student_logits.reshape(B * L, V)
+    targets_flat = hard_targets.reshape(B * L)
+    mask_flat    = masked_positions.reshape(B * L)
 
     if mask_flat.sum() == 0:
         return student_logits.sum() * 0.0
@@ -125,9 +125,9 @@ def mdm_training_loss(
         return student_logits.sum() * 0.0
 
     B, L, V = student_logits.shape
-    logits_flat  = student_logits.view(B * L, V)
-    targets_flat = x0.view(B * L)
-    mask_flat    = masked_positions.view(B * L)
+    logits_flat  = student_logits.reshape(B * L, V)
+    targets_flat = x0.reshape(B * L)
+    mask_flat    = masked_positions.reshape(B * L)
 
     ce = F.cross_entropy(logits_flat[mask_flat], targets_flat[mask_flat])
     return ce / max(t, 1e-8)
