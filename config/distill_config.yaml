@@ -104,7 +104,7 @@ training:
   seed: 42
   log_every: 50          # Print loss every N gradient steps
   save_every: 2000       # Save a checkpoint every N gradient steps
-  save_dir: "checkpoints/distill"
+  save_dir: "/scratch/gilbreth/shen574/checkpoints/distill"
 
 hardware:
   device: "cuda"
