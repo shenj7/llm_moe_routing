@@ -189,9 +189,11 @@ class ProgressiveDistiller:
         # Optionally resume from a checkpoint.
         ckpt_path = round_cfg.get("student_ckpt")
         if ckpt_path and os.path.isfile(ckpt_path):
-            logger.info("Resuming student from checkpoint: %s", ckpt_path)
+            logger.info("Loading student weights from checkpoint: %s", ckpt_path)
             state = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-            student.load_state_dict(state)
+            # Support both full training checkpoints (dict with "model" key)
+            # and legacy weight-only checkpoints (plain state dict).
+            student.load_state_dict(state.get("model", state))
 
         student = student.to(self.device, dtype=torch.bfloat16)
 
@@ -288,14 +290,36 @@ class ProgressiveDistiller:
         student.train()
         teacher_model.eval()
 
-        data_iter    = iter(self.dataloader)
-        global_step  = 0
-        running_loss = 0.0
+        data_iter        = iter(self.dataloader)
+        global_step      = 0
+        start_micro_step = 0
+        running_loss     = 0.0
         optimizer.zero_grad()
 
-        micro_steps_total = max_steps * grad_accum
+        # ---- Restore optimizer / scheduler state if resuming -----------------
+        ckpt_path = round_cfg.get("student_ckpt")
+        if ckpt_path and os.path.isfile(ckpt_path):
+            resume = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+            if isinstance(resume, dict) and "optimizer" in resume:
+                optimizer.load_state_dict(resume["optimizer"])
+                scheduler.load_state_dict(resume["scheduler"])
+                global_step      = resume["global_step"]
+                start_micro_step = resume["micro_step"] + 1
+                logger.info(
+                    "Resumed optimizer/scheduler — continuing from "
+                    "global_step=%d, micro_step=%d.",
+                    global_step, resume["micro_step"],
+                )
+            else:
+                logger.info(
+                    "Checkpoint contains weights only — "
+                    "optimizer/scheduler state not restored."
+                )
 
-        for micro_step in range(micro_steps_total):
+        micro_steps_total = max_steps * grad_accum
+        last_micro_step   = max(start_micro_step - 1, 0)
+
+        for micro_step in range(start_micro_step, micro_steps_total):
             # ---- Fetch batch -------------------------------------------------
             try:
                 x0 = next(data_iter)
@@ -355,7 +379,8 @@ class ProgressiveDistiller:
                 break
 
             loss.backward()
-            running_loss += loss.item()
+            running_loss  += loss.item()
+            last_micro_step = micro_step
 
             # ---- Gradient accumulation step ----------------------------------
             if (micro_step + 1) % grad_accum == 0:
@@ -378,7 +403,13 @@ class ProgressiveDistiller:
 
                 if global_step % save_every == 0:
                     ckpt = os.path.join(save_dir, f"{round_name}_step{global_step}.pt")
-                    torch.save(student.state_dict(), ckpt)
+                    torch.save({
+                        "model":       student.state_dict(),
+                        "optimizer":   optimizer.state_dict(),
+                        "scheduler":   scheduler.state_dict(),
+                        "global_step": global_step,
+                        "micro_step":  micro_step,
+                    }, ckpt)
                     logger.info("Checkpoint saved: %s", ckpt)
 
                 if global_step >= max_steps:
@@ -386,7 +417,13 @@ class ProgressiveDistiller:
 
         # ---- Save final model ------------------------------------------------
         final_path = os.path.join(save_dir, f"{round_name}_final.pt")
-        torch.save(student.state_dict(), final_path)
+        torch.save({
+            "model":       student.state_dict(),
+            "optimizer":   optimizer.state_dict(),
+            "scheduler":   scheduler.state_dict(),
+            "global_step": global_step,
+            "micro_step":  last_micro_step,
+        }, final_path)
         logger.info("Round %d complete.  Final model: %s", round_idx, final_path)
 
         return student
