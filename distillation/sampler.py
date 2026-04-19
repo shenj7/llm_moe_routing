@@ -17,7 +17,7 @@ Inference (reverse process) uses "low-confidence remasking":
 
 from __future__ import annotations
 
-from typing import Tuple
+from typing import Dict, List, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -188,3 +188,58 @@ def teacher_two_step(
         target_probs[newly_unmasked] = one_hot[newly_unmasked]
 
     return target_probs, originally_masked
+
+
+@torch.no_grad()
+def teacher_multi_step(
+    teacher: torch.nn.Module,
+    x_t: torch.Tensor,
+    t_frac: float,
+    base_delta_t: float,
+    checkpoint_steps: List[int],
+    mask_token_id: int = LLADA_MASK_TOKEN_ID,
+) -> Dict[int, Tuple[torch.Tensor, torch.Tensor]]:
+    """
+    Run teacher for max(checkpoint_steps) denoising steps of size base_delta_t,
+    capturing a soft target distribution at each step in checkpoint_steps.
+
+    This lets multiple students share a single teacher trajectory: e.g. for
+    students at [64, 32, 16] steps the teacher runs 8 steps total and returns
+    targets at steps [2, 4, 8], rather than running 2+4+8=14 passes separately.
+
+    Args:
+        teacher:          Frozen teacher model.
+        x_t:              Noisy input tokens, shape [B, L].
+        t_frac:           Current masking fraction (scalar float).
+        base_delta_t:     Teacher step size = 1 / base_teacher_steps.
+        checkpoint_steps: Sorted list of step counts at which to capture targets.
+        mask_token_id:    [MASK] token ID.
+
+    Returns:
+        Dict mapping each n in checkpoint_steps to
+            (target_probs [B, L, V], originally_masked [B, L]).
+    """
+    originally_masked = (x_t == mask_token_id)
+    checkpoint_set    = set(checkpoint_steps)
+    x_cur  = x_t
+    cur_t  = t_frac
+    results: Dict[int, Tuple[torch.Tensor, torch.Tensor]] = {}
+
+    for step in range(1, max(checkpoint_steps) + 1):
+        x_cur, _ = _teacher_single_step(teacher, x_cur, cur_t, base_delta_t, mask_token_id)
+        cur_t = max(cur_t - base_delta_t, 0.0)
+
+        if step in checkpoint_set:
+            out          = teacher(input_ids=x_cur)
+            target_probs = F.softmax(out.logits.float(), dim=-1)  # [B, L, V]
+
+            still_masked   = (x_cur == mask_token_id)
+            newly_unmasked = originally_masked & ~still_masked
+            if newly_unmasked.any():
+                vocab_size = target_probs.shape[-1]
+                one_hot    = F.one_hot(x_cur.long(), num_classes=vocab_size).float()
+                target_probs[newly_unmasked] = one_hot[newly_unmasked]
+
+            results[step] = (target_probs.clone(), originally_masked.clone())
+
+    return results

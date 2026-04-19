@@ -159,26 +159,33 @@ def main(
     distiller = ProgressiveDistiller(cfg=cfg, device=dev)
 
     # ---- Run ---------------------------------------------------------------
-    if round is not None:
-        rounds = cfg["distillation"]["rounds"]
-        if round >= len(rounds):
-            raise typer.BadParameter(
-                f"--round {round} is out of range "
-                f"(config has {len(rounds)} rounds: 0 … {len(rounds) - 1})."
-            )
-        round_cfg = rounds[round]
-        logger.info(
-            "Running single round %d: %s",
-            round,
-            round_cfg.get("name", f"round{round}"),
-        )
-        distiller.train_round(
-            round_idx     = round,
-            round_cfg     = round_cfg,
-            teacher_model = distiller.teacher,
-        )
+    mode = cfg["distillation"].get("mode", "progressive")
+
+    if mode == "simultaneous":
+        if round is not None:
+            logger.warning("--round is ignored in simultaneous mode.")
+        distiller.train_simultaneous()
     else:
-        distiller.train_all_rounds()
+        if round is not None:
+            rounds = cfg["distillation"]["rounds"]
+            if round >= len(rounds):
+                raise typer.BadParameter(
+                    f"--round {round} is out of range "
+                    f"(config has {len(rounds)} rounds: 0 … {len(rounds) - 1})."
+                )
+            round_cfg = rounds[round]
+            logger.info(
+                "Running single round %d: %s",
+                round,
+                round_cfg.get("name", f"round{round}"),
+            )
+            distiller.train_round(
+                round_idx     = round,
+                round_cfg     = round_cfg,
+                teacher_model = distiller.teacher,
+            )
+        else:
+            distiller.train_all_rounds()
 
 
 if __name__ == "__main__":

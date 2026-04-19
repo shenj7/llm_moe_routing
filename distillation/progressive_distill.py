@@ -37,6 +37,7 @@ from distillation.sampler import (
     apply_masking,
     sample_time_index,
     teacher_two_step,
+    teacher_multi_step,
 )
 from models.student_arch import create_student_model
 
@@ -427,6 +428,193 @@ class ProgressiveDistiller:
         logger.info("Round %d complete.  Final model: %s", round_idx, final_path)
 
         return student
+
+    # ------------------------------------------------------------------
+    # Simultaneous multi-student training
+    # ------------------------------------------------------------------
+
+    def train_simultaneous(self) -> None:
+        """
+        Train all students simultaneously from a single shared teacher trajectory.
+
+        For each micro-batch the teacher runs once for max(teacher_steps_per_student)
+        denoising steps, capturing intermediate targets for every student along the
+        way.  Each student then independently does its own forward + backward pass
+        against its target.  This avoids re-running the teacher for each student.
+
+        Requires distillation.mode == "simultaneous" and distillation.students
+        list in the config.
+        """
+        d_cfg = self.cfg["distillation"]
+        t_cfg = self.cfg["training"]
+
+        student_cfgs      = d_cfg["students"]
+        base_teacher_steps = d_cfg["base_teacher_steps"]
+        base_delta_t      = 1.0 / base_teacher_steps
+        max_steps         = d_cfg["max_train_steps"]
+        loss_type         = d_cfg.get("loss_type", "score_matching")
+        mdm_weight        = d_cfg.get("loss_weight_original", 0.0)
+        grad_accum        = t_cfg.get("gradient_accumulation_steps", 8)
+        max_grad_norm     = t_cfg.get("max_grad_norm", 1.0)
+        log_every         = t_cfg.get("log_every", 50)
+        save_every        = t_cfg.get("save_every", 2000)
+        save_dir          = t_cfg.get("save_dir", "checkpoints/distill")
+
+        os.makedirs(save_dir, exist_ok=True)
+
+        # Number of teacher steps needed per student:
+        #   student at S steps covers delta_s = 1/S per step;
+        #   teacher step size = base_delta_t = 1/base_teacher_steps;
+        #   teacher steps needed = delta_s / base_delta_t = base_teacher_steps / S
+        n_teacher_steps = {
+            s["student_steps"]: base_teacher_steps // s["student_steps"]
+            for s in student_cfgs
+        }
+        checkpoint_steps  = sorted(set(n_teacher_steps.values()))
+        min_student_steps = min(s["student_steps"] for s in student_cfgs)
+
+        logger.info("")
+        logger.info("=" * 60)
+        logger.info("Simultaneous distillation — %d students", len(student_cfgs))
+        for s in student_cfgs:
+            logger.info(
+                "  %s  (%d steps, %d teacher steps/batch)",
+                s["name"], s["student_steps"], n_teacher_steps[s["student_steps"]],
+            )
+        logger.info("=" * 60)
+
+        students   = [self._create_student(s) for s in student_cfgs]
+        optimizers = [self._create_optimizer(s) for s in students]
+        schedulers = [self._create_scheduler(opt, max_steps) for opt in optimizers]
+
+        for s in students:
+            s.train()
+        self.teacher.eval()
+
+        data_iter     = iter(self.dataloader)
+        global_step   = 0
+        running_losses = [0.0] * len(students)
+
+        for opt in optimizers:
+            opt.zero_grad()
+
+        micro_steps_total = max_steps * grad_accum
+        last_micro_step   = 0
+
+        for micro_step in range(micro_steps_total):
+            try:
+                x0 = next(data_iter)
+            except StopIteration:
+                data_iter = iter(self.dataloader)
+                x0 = next(data_iter)
+            x0 = x0.to(self.device)
+
+            # Sample t valid for all students (most restrictive = fewest steps)
+            k_tensor = sample_time_index(
+                batch_size=1,
+                num_steps=min_student_steps,
+                device=self.device,
+            )
+            t_frac = int(k_tensor.item()) / min_student_steps
+
+            x_t = apply_masking(x0, t_frac, self._mask_token_id)
+
+            # One teacher trajectory shared across all students
+            with torch.no_grad():
+                targets = teacher_multi_step(
+                    teacher          = self.teacher,
+                    x_t              = x_t,
+                    t_frac           = t_frac,
+                    base_delta_t     = base_delta_t,
+                    checkpoint_steps = checkpoint_steps,
+                    mask_token_id    = self._mask_token_id,
+                )
+
+            # Each student trains against its own checkpoint target
+            for i, (student, optimizer, s_cfg) in enumerate(
+                zip(students, optimizers, student_cfgs)
+            ):
+                chk = n_teacher_steps[s_cfg["student_steps"]]
+                target_probs, masked_positions = targets[chk]
+
+                with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16):
+                    out            = student(input_ids=x_t)
+                    student_logits = _get_logits(out)
+
+                    loss = combined_loss(
+                        student_logits   = student_logits.float(),
+                        target_probs     = target_probs,
+                        x0               = x0,
+                        masked_positions = masked_positions,
+                        t                = t_frac,
+                        loss_type        = loss_type,
+                        mdm_weight       = mdm_weight,
+                    )
+                    loss = loss / grad_accum
+
+                if not torch.isfinite(loss):
+                    logger.error(
+                        "Non-finite loss for student '%s' at micro_step %d — skipping.",
+                        s_cfg["name"], micro_step,
+                    )
+                    continue
+
+                loss.backward()
+                running_losses[i] += loss.item()
+
+            last_micro_step = micro_step
+
+            if (micro_step + 1) % grad_accum == 0:
+                for student, optimizer, scheduler in zip(students, optimizers, schedulers):
+                    nn.utils.clip_grad_norm_(student.parameters(), max_grad_norm)
+                    optimizer.step()
+                    scheduler.step()
+                    optimizer.zero_grad()
+
+                global_step  += 1
+                lr            = optimizers[0].param_groups[0]["lr"]
+
+                if global_step % log_every == 0:
+                    loss_str = "  ".join(
+                        f"{s['name']}={running_losses[i]:.4f}"
+                        for i, s in enumerate(student_cfgs)
+                    )
+                    logger.info(
+                        "step %d/%d  %s  lr=%.2e  t=%.3f",
+                        global_step, max_steps, loss_str, lr, t_frac,
+                    )
+
+                running_losses = [0.0] * len(students)
+
+                if global_step % save_every == 0:
+                    for i, s_cfg in enumerate(student_cfgs):
+                        ckpt = os.path.join(
+                            save_dir, f"{s_cfg['name']}_step{global_step}.pt"
+                        )
+                        torch.save({
+                            "model":       students[i].state_dict(),
+                            "optimizer":   optimizers[i].state_dict(),
+                            "scheduler":   schedulers[i].state_dict(),
+                            "global_step": global_step,
+                            "micro_step":  micro_step,
+                        }, ckpt)
+                    logger.info("Checkpoints saved at step %d", global_step)
+
+                if global_step >= max_steps:
+                    break
+
+        for i, s_cfg in enumerate(student_cfgs):
+            final_path = os.path.join(save_dir, f"{s_cfg['name']}_final.pt")
+            torch.save({
+                "model":       students[i].state_dict(),
+                "optimizer":   optimizers[i].state_dict(),
+                "scheduler":   schedulers[i].state_dict(),
+                "global_step": global_step,
+                "micro_step":  last_micro_step,
+            }, final_path)
+            logger.info("Saved: %s", final_path)
+
+        logger.info("Simultaneous distillation complete.")
 
     # ------------------------------------------------------------------
     # Orchestrate all rounds

@@ -21,35 +21,35 @@ teacher:
   mask_token_id: 126336
 
 # ------------------------------------------------------------------
-# Progressive distillation rounds
+# Distillation configuration
 # ------------------------------------------------------------------
 distillation:
-  initial_steps: 128        # Default LLaDA inference steps (matched to seq length)
+  # mode: "simultaneous" trains all students at once from a shared teacher
+  # trajectory, which is more efficient than sequential progressive distillation.
+  mode: "simultaneous"
 
-  rounds:
-    - name: "round0_128to64"
-      teacher_steps: 128
+  # LLaDA-8B runs at 128 denoising steps by default.
+  # base_delta_t = 1 / base_teacher_steps is the teacher's step size.
+  base_teacher_steps: 128
+
+  # Each student is trained to denoise in fewer steps than the teacher.
+  # teacher_steps_per_student = base_teacher_steps / student_steps
+  # e.g. 64-step student needs 2 teacher steps per student step.
+  students:
+    - name: "student_64step"
       student_steps: 64
-      # Student architecture.  Point to a YAML in config/student_configs/,
-      # or use the 'student_preset' shorthand ("400m" | "1b" | "3b").
       student_config: "config/student_configs/student_1b.yaml"
       # student_ckpt: null   # Set to a .pt path to resume from a checkpoint.
-      max_train_steps: 20000
 
-    - name: "round1_64to32"
-      teacher_steps: 64
+    - name: "student_32step"
       student_steps: 32
       student_config: "config/student_configs/student_1b.yaml"
-      # After round 0 finishes, the trained student becomes the new teacher.
-      use_prev_student_as_teacher: true
-      max_train_steps: 20000
 
-    - name: "round2_32to16"
-      teacher_steps: 32
+    - name: "student_16step"
       student_steps: 16
       student_config: "config/student_configs/student_1b.yaml"
-      use_prev_student_as_teacher: true
-      max_train_steps: 20000
+
+  max_train_steps: 20000
 
   # Loss applied to masked positions between student and teacher distributions.
   #   "score_matching"  – MSE between softmax probability vectors  (default)

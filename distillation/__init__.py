@@ -1,5 +1,5 @@
 from distillation.losses import combined_loss, score_matching_loss, kl_distillation_loss
-from distillation.sampler import apply_masking, sample_time_index, teacher_two_step
+from distillation.sampler import apply_masking, sample_time_index, teacher_two_step, teacher_multi_step
 from distillation.progressive_distill import ProgressiveDistiller
 
 __all__ = [
@@ -9,5 +9,6 @@ __all__ = [
     "apply_masking",
     "sample_time_index",
     "teacher_two_step",
+    "teacher_multi_step",
     "ProgressiveDistiller",
 ]
