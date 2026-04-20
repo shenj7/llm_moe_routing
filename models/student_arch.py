@@ -126,15 +126,34 @@ def create_student_model(
     logger.info("Fetching base config from %s …", template_model_id)
     config = AutoConfig.from_pretrained(template_model_id, trust_remote_code=True)
 
-    # Rebuild config from its dict so we can override read-only properties
-    # that newer transformers versions expose via property descriptors.
-    config_dict = config.to_dict()
+    # Build a dict of only the settable (non-read-only-property) attributes.
+    # The LLaDA config exposes some attributes (e.g. num_attention_heads) as
+    # computed read-only properties; passing them into from_dict/from_pretrained
+    # causes an AttributeError because PretrainedConfig.__init__ tries setattr.
+    # We drop those keys — the properties will recompute automatically from the
+    # backing attributes (e.g. hidden_size) that we do set.
+    config_cls = type(config)
+    settable: dict = {}
+    for key, value in config.to_dict().items():
+        is_readonly_prop = any(
+            key in klass.__dict__
+            and isinstance(klass.__dict__[key], property)
+            and klass.__dict__[key].fset is None
+            for klass in config_cls.__mro__
+        )
+        if not is_readonly_prop:
+            settable[key] = value
+
     for key, value in size_params.items():
-        if key in config_dict or hasattr(config, key):
-            config_dict[key] = value
+        if key in settable:
+            settable[key] = value
         else:
-            logger.warning("Config has no attribute '%s' — skipping.", key)
-    config = type(config).from_dict(config_dict)
+            logger.warning(
+                "'%s' is read-only or absent in the LLaDA config — skipping "
+                "(it will be recomputed from underlying attributes).", key
+            )
+
+    config = type(config).from_dict(settable)
 
     # ---- Build model with random weights -----------------------------------
     logger.info("Instantiating student model …")
